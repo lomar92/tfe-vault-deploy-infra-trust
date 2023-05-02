@@ -1,0 +1,115 @@
+---
+- name: Install and configure Vault on localhost
+  hosts: localhost
+  gather_facts: yes
+  become: yes
+  tasks:
+    - name: Install jq
+      yum:
+        name: jq
+        state: present
+
+    - name: Download Vault
+      get_url:
+        url: "https://releases.hashicorp.com/vault/1.12.3+ent/vault_1.12.3+ent_linux_amd64.zip"
+        dest: "/tmp/vault_1.12.3+ent_linux_amd64.zip"
+
+    - name: Unzip Vault
+      unarchive:
+        src: "/tmp/vault_1.12.3+ent_linux_amd64.zip"
+        dest: "/usr/local/bin"
+        remote_src: yes
+
+    - name: Set Vault capabilities
+      command: setcap cap_ipc_lock=+ep /usr/local/bin/vault
+
+    - name: Create Vault configuration directories
+      file:
+        path: "{{ item }}"
+        state: directory
+        mode: 0777
+      loop:
+        - /etc/vault.d
+        - /opt/raft
+
+    - name: Create Vault License file
+      copy:
+        content: "{{ lookup('env', 'VAULT_LICENSE') }}"
+        dest: /etc/vault.d/license.hclic
+        mode: 0777
+
+    - name: Create Vault configuration file
+      copy:
+        content: |
+          storage "raft" {
+            path = "/opt/raft"
+            node_id = "node1"
+          }
+
+          listener "tcp" {
+            address     = "0.0.0.0:8200"
+            tls_disable = "true"
+          }
+
+          seal "awskms" {
+            region     = "eu-central-1"
+            kms_key_id = "5b800a14-6598-496d-af58-a0e3554c2aa9"
+          }
+
+          disable_mlock = true
+          api_addr = "http://127.0.0.1:8200"
+          cluster_addr = "http://127.0.0.1:8201"
+          ui = true
+
+          license_path = "/etc/vault.d/license.hclic"
+          env {
+            VAULT_LICENSE = "{{ lookup('env', 'VAULT_LICENSE') }}"
+          }
+          
+        dest: /etc/vault.d/vault.hcl
+        mode: 0777
+
+    - name: Create Vault systemd service
+      copy:
+        content: |
+          [Unit]
+          Description="HashiCorp Vault - A tool for managing secrets"
+          Documentation=https://www.vaultproject.io/docs/
+          Requires=network-online.target
+          After=network-online.target
+          ConditionFileNotEmpty=/etc/vault.d/vault.hcl
+          StartLimitIntervalSec=60
+          StartLimitBurst=3
+
+          [Service]
+          User=ec2-user
+          Group=ec2-user
+          ProtectSystem=full
+          ProtectHome=read-only
+          PrivateTmp=yes
+          PrivateDevices=yes
+          SecureBits=keep-caps
+          AmbientCapabilities=CAP_IPC_LOCK
+          Capabilities=CAP_IPC_LOCK+ep
+          CapabilityBoundingSet=CAP_SYSLOG CAP_IPC_LOCK
+          NoNewPrivileges=yes
+          ExecStart=/usr/local/bin/vault server -config=/etc/vault.d/vault.hcl
+          ExecReload=/bin/kill --signal HUP $MAINPID
+          KillMode=process
+          KillSignal=SIGINT
+          Restart=on-failure
+          RestartSec=5
+          TimeoutStopSec=30
+          LimitNOFILE=65536
+          LimitMEMLOCK=infinity
+
+          [Install]
+          WantedBy=multi-user.target
+        dest: /etc/systemd/system/vault.service
+        mode: 0777
+
+    - name: Enable and start Vault service
+      systemd:
+        name: vault
+        enabled: yes
+        state: started
